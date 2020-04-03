@@ -3,7 +3,10 @@ extern crate sdl2;
 
 use std::io;
 use std::io::prelude::*;
+use std::env;
 use std::fs::File;
+
+use sdl2::keyboard;
 
 use rand::Rng;
 
@@ -29,22 +32,22 @@ const FONTSET: [u8; 80] =
 
 // scancodes mapped to reasonable keys
 const SCANCODES: [sdl2::keyboard::Scancode; 16] = [
-    sdl2::keyboard::Scancode::Num1,
-    sdl2::keyboard::Scancode::Num2,
-    sdl2::keyboard::Scancode::Num3,
-    sdl2::keyboard::Scancode::Num4,
-    sdl2::keyboard::Scancode::Q,
-    sdl2::keyboard::Scancode::W,
-    sdl2::keyboard::Scancode::E,
-    sdl2::keyboard::Scancode::R,
-    sdl2::keyboard::Scancode::A,
-    sdl2::keyboard::Scancode::S,
-    sdl2::keyboard::Scancode::D,
-    sdl2::keyboard::Scancode::F,
-    sdl2::keyboard::Scancode::Z,
-    sdl2::keyboard::Scancode::X,
-    sdl2::keyboard::Scancode::C,
-    sdl2::keyboard::Scancode::V,
+    keyboard::Scancode::X,
+    keyboard::Scancode::Num1,
+    keyboard::Scancode::Num2,
+    keyboard::Scancode::Num3,
+    keyboard::Scancode::Q,
+    keyboard::Scancode::W,
+    keyboard::Scancode::E,
+    keyboard::Scancode::A,
+    keyboard::Scancode::S,
+    keyboard::Scancode::D,
+    keyboard::Scancode::Z,
+    keyboard::Scancode::C,
+    keyboard::Scancode::Num4,
+    keyboard::Scancode::R,
+    keyboard::Scancode::F,
+    keyboard::Scancode::V,
 ];
 
 pub struct CPU {
@@ -101,7 +104,17 @@ impl CPU {
 }
 
 fn main() -> io::Result<()> {
-    let f = File::open("pong.rom")?;
+    let args: Vec<String> = env::args().collect();
+    
+
+    if args.len() > 1 {
+        if args.len() != 2 {
+            println!("usage: <program name> <rom name>");
+            return Ok(());
+        }
+    }
+    let f = File::open(&args[1])?;
+    // let f = File::open("key_test.ch8")?;
 
     let mut cpu = CPU::new();
     cpu.load_fondset();
@@ -136,7 +149,7 @@ fn main() -> io::Result<()> {
         let op_3 = (op_code & 0x00F0) >> 4;
         let op_4 = op_code & 0x000F;
 
-        // println!("{:X}::{:X}{:X}{:X}{:X}", cpu.pc, op_1, op_2, op_3, op_4);
+        println!("{:X}::{:X}{:X}{:X}{:X}", cpu.pc, op_1, op_2, op_3, op_4);
 
         match (op_1, op_2, op_3, op_4) {
             // 00E0 - cls
@@ -159,8 +172,8 @@ fn main() -> io::Result<()> {
             },
             // 2nnn - call nnn
             (0x2, _, _, _) => {
-                cpu.stack[cpu.sp as usize] = cpu.pc;
                 cpu.sp += 1;
+                cpu.stack[cpu.sp as usize] = cpu.pc;
                 cpu.pc = op_2 << 8 | op_3 << 4 | op_4;
                 continue;
             }
@@ -221,31 +234,41 @@ fn main() -> io::Result<()> {
             // 8xy6 - shr rx
             (0x8, _, _, 0x6) => {
                 cpu.r[0xF] = 1 & cpu.r[op_2 as usize];
-                cpu.r[op_2 as usize] = cpu.r[op_2 as usize] >> 1;
+                cpu.r[op_2 as usize] >>= 1;
             },
             // 8xy7 - subn rx, ry
             (0x8, _, _, 0x7) => {
-
+                cpu.r[0xF] = if cpu.r[op_2 as usize] > cpu.r[op_3 as usize] {1} else {0};
+                cpu.r[op_2 as usize] = cpu.r[op_3 as usize].wrapping_sub(cpu.r[op_2 as usize]);
+            },
+            // 8xyE - shl rx
+            (0x8, _, _, 0xE) => {
+                cpu.r[0xF] = (cpu.r[op_2 as usize] & 0x80) >> 7;
+                cpu.r[op_2 as usize] <<= 1; 
+            },
+            // 9xy0 - sne rx, ry
+            (0x9, _, _, 0x0) => {
+                if cpu.r[op_2 as usize] != cpu.r[op_3 as usize] {
+                    cpu.pc += 2;
+                }
             },
             // Annn - ld i, nnn
             (0xA, _, _, _) => {
                 cpu.i = op_2 << 8 | op_3 << 4 | op_4;
-                // println!("\tcpu.i = {:04X}", cpu.i);
             },
             // Cxkk - rnd rx, kk
             (0xC, _, _, _) => {
                 let mut rng =  rand::thread_rng();
                 let rand: u8 = rng.gen_range(0, 255);
                 cpu.r[op_2 as usize] = rand & (op_3 << 4) as u8 | op_4 as u8;
-                // println!("\t{:X} and {:X} = {:X}", rand, (op_3 << 4) as u8 | op_4 as u8, rand & (op_3 << 4) as u8 | op_4 as u8);
             },
             // Dxyn - drw rx, ry, w
             (0xD, _, _, _) => {
+                println!("\tsprite at ({}, {}), {} bytes high", cpu.r[op_2 as usize], cpu.r[op_3 as usize], op_4);
                 for offset in 0..op_4 {
                     for bit in 0..8 {
-                        // needs collision detection
-                        let x = ((cpu.r[op_2 as usize] + bit as u8) % 64 as u8) as usize;
-                        let y = ((cpu.r[op_3 as usize] + offset as u8) % 32 as u8) as usize;
+                        let x = ((cpu.r[op_2 as usize] as u16 + bit as u16) % 64 as u16) as usize;
+                        let y = ((cpu.r[op_3 as usize] as u16 + offset as u16) % 32 as u16) as usize;
                         if cpu.display[y][x] == 1 && (cpu.memory[(cpu.i+offset) as usize] & 0x1 << (7 - bit)) >> (7 - bit) == 1 {
                             cpu.r[0xF] = 1;
                         } else {
@@ -254,54 +277,68 @@ fn main() -> io::Result<()> {
                         cpu.display[y][x] ^= (cpu.memory[(cpu.i+offset) as usize] & 0x1 << (7 - bit)) >> (7 - bit)
                     }
                 }
+                // for row in cpu.display.iter() {
+                //     for col in row.iter() {
+                //         print!("{:X} ", col);
+                //     }
+                //     println!();
+                // }
                 cpu.draw_screen(&mut renderer);
             },
             // ExA1 - sknp rx - skip next if key not pressed
             (0xE, _, 0xA, 0x1) => {
-                let keys = sdl2::keyboard::KeyboardState::new(&event_pump);
+                let keys = keyboard::KeyboardState::new(&event_pump);
                 if keys.is_scancode_pressed(SCANCODES[cpu.r[op_2 as usize] as usize]) == false {
                     cpu.pc += 2;
-                    // println!("\tskipped because {:X} is not pressed", cpu.r[op_2 as usize]);
-                } else {
-                    // println!("\tnot skipped because {:X} is pressed", cpu.r[op_2 as usize]);
                 }
             },
             // Fx07 - ld rx, dt
             (0xF, _, 0x0, 0x7) => {
                 cpu.r[op_2 as usize] = cpu.delay_timer;
-                // println!("\tdelay timer was {} set into r[{}]", cpu.delay_timer, op_2);
+            },
+            // Fx0A - ld rx, k // wait for keypress
+            (0xF, _, 0x0, 0xA) => {
+                let keys = sdl2::keyboard::KeyboardState::new(&event_pump);
+                for key in SCANCODES.iter() {
+                    if !keys.is_scancode_pressed(*key) {
+                        continue;
+                    } else {
+                        cpu.r[op_2 as usize] = SCANCODES.iter().position(|&r| r == *key).unwrap() as u8;
+                    }
+                }
             },
             // Fx15 - ld dt, rx
             (0xF, _, 0x1, 0x5) => {
                 cpu.delay_timer = cpu.r[op_2 as usize];
-                // println!("\tdelay timer set to {}", cpu.delay_timer);
             },
             // Fx18 - ld st, rx
             (0xF, _, 0x1, 0x8) => {
                 cpu.sound_timer = cpu.r[op_2 as usize];
-                // println!("\tsound timer set to {}", cpu.sound_timer);
+            },
+            // Fx1E - add I, rx
+            (0xF, _, 0x1, 0xE) => {
+                cpu.i += cpu.r[op_2 as usize] as u16;
             },
             // Fx29 - ld f, rx
             (0xF, _, 0x2, 0x9) => {
                 cpu.i = (cpu.r[op_2 as usize] * 0x5) as u16;
-                // println!("\tcpu.i = {:X}, char: {:X}", cpu.i, cpu.r[op_2 as usize]);
             },
             // Fx33 - ld b, rx // hundreds digit = I, tens digit = I+1, ones digit = I+2
             (0xF, _, 0x3, 0x3) => {
                 cpu.memory[cpu.i as usize] = cpu.r[op_2 as usize] / 100;
                 cpu.memory[(cpu.i+1) as usize] = (cpu.r[op_2 as usize] / 10) % 10 as u8;
                 cpu.memory[(cpu.i+2) as usize] = cpu.r[op_2 as usize] % 10 as u8;
-                // println!("\thundreds: {}, tens: {}, ones: {}", 
-                //     cpu.memory[cpu.i as usize], 
-                //     cpu.memory[(cpu.i+1) as usize], 
-                //     cpu.memory[(cpu.i+2) as usize]
-                // );
+            },
+            // Fx55 - ld [i], rx
+            (0xF, _, 0x5, 0x5) => {
+                for num in 0..op_2 {
+                    cpu.memory[(cpu.i+num) as usize] = cpu.r[num as usize];
+                }
             },
             // Fx65 - ld rx, [I]
             (0xF, _, 0x6, 0x5) => {
                 for num in 0..=op_2 {
                     cpu.r[num as usize] = cpu.memory[(cpu.i+num) as usize];
-                    // println!("\t{:X}", cpu.r[num as usize]);
                 }
             },
             (_, _, _, _) => break,
@@ -312,10 +349,13 @@ fn main() -> io::Result<()> {
         }
         cpu.pc += 2;
         // cpu.draw_screen(&mut renderer);
-        std::thread::sleep(std::time::Duration::from_millis(1))
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        // let _ = std::io::stdin().read(&mut [0u8]).unwrap();
     }
 
     println!("\nbroke on {:04X}", cpu.read_op_code());
+
+    let _ = std::io::stdin().read(&mut [0u8]).unwrap();
 
     Ok(())
 }
