@@ -3,6 +3,8 @@ extern crate sdl2;
 
 use std::io;
 use std::io::prelude::*;
+use std::sync::mpsc::{Sender, Receiver};
+use std::sync::mpsc;
 use std::env;
 use std::fs::File;
 
@@ -60,6 +62,8 @@ pub struct CPU {
     pub display: [[u8; 64]; 32],
     pub delay_timer: u8,
     pub sound_timer: u8,
+    pub delay_between_instructions: std::time::Duration,
+    pub delay_between_cycles: std::time::Duration,
 }
 
 impl CPU {
@@ -74,6 +78,8 @@ impl CPU {
             display: [[0; 64]; 32],
             delay_timer: 0,
             sound_timer: 0,
+            delay_between_instructions: std::time::Duration::from_micros(16600),
+            delay_between_cycles: std::time::Duration::from_millis(3),
         } 
     }
     pub fn load_fondset(&mut self) {
@@ -95,24 +101,56 @@ impl CPU {
                 } else {
                     renderer.set_draw_color(sdl2::pixels::Color::RGB(0, 0, 0));
                 }
-                let rect = sdl2::rect::Rect::new(x as i32 * 10, y as i32 * 10, 10, 10);
+
+                // calculate size of a pixel so window resizing works properly
+                let width = renderer.viewport().width();
+                let height= renderer.viewport().height();
+                let pixel_width = width / 64;
+                let pixel_height = height / 32;
+
+                let rect = sdl2::rect::Rect::new(x as i32 * pixel_width as i32, y as i32 * pixel_height as i32, pixel_width, pixel_height);
                 renderer.fill_rect(rect).unwrap();
             }
         }
         renderer.present();
+    }
+    pub fn cycle(&mut self) {
+        std::thread::sleep(self.delay_between_cycles);
+        self.pc += 2;
+    }
+    pub fn faster(&mut self) {
+        self.delay_between_instructions += std::time::Duration::from_millis(1);
+    }
+    pub fn slower(&mut self) {
+        self.delay_between_instructions -= std::time::Duration::from_millis(1);
+    }
+    pub fn reset_emu(&mut self) {
+        self.pc = 0x200;
+        self.r = [0; 16];
+        self.i = 0;
+        self.sp = 0;
+        self.stack = [0; 16];
+        self.display = [[0; 64]; 32];
+        self.delay_timer = 0;
+        self.sound_timer = 0;
     }
 }
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
     
-
-    if args.len() > 1 {
+    if args.len() >= 1 {
         if args.len() != 2 {
             println!("usage: <program name> <rom name>");
             return Ok(());
         }
+        if args.len() == 1 {
+            return Ok(());
+        }
     }
+    
+    println!("--{:?}--", args);
+
     let f = File::open(&args[1])?;
     // let f = File::open("key_test.ch8")?;
 
@@ -132,8 +170,17 @@ fn main() -> io::Result<()> {
     event_pump.disable_event(sdl2::event::EventType::KeyDown);
     event_pump.disable_event(sdl2::event::EventType::KeyUp);
     let video = sdl.video().unwrap();
-    let window = video.window("chip 8", 640, 320).build().unwrap();
+    let window = video.window("chip 8", 640, 320).resizable().build().unwrap();
     let mut renderer = window.renderer().accelerated().build().unwrap();
+
+    // async setup because properly decrementing counters at 60hz is hard
+    let (tx, rx): (Sender<u8>, Receiver<u8>) = mpsc::channel();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_micros(16600));
+            tx.send(1).unwrap();
+        }
+    });
 
     'main: loop {
         for event in event_pump.poll_iter() {
@@ -141,6 +188,25 @@ fn main() -> io::Result<()> {
                 sdl2::event::Event::Quit {..} => break 'main,
                 _ => {},
             }
+        }
+        
+        for key in keyboard::KeyboardState::new(&event_pump).pressed_scancodes() {
+            match key {
+                keyboard::Scancode::Backspace => {
+                    cpu.reset_emu();
+                },
+                keyboard::Scancode::Minus => {
+                    cpu.slower();
+                },
+                keyboard::Scancode::Equals => {
+                    cpu.faster();
+                },
+                _ => {},
+            }
+        }
+        if keyboard::KeyboardState::new(&event_pump).is_scancode_pressed(keyboard::Scancode::Backspace) {
+            cpu.reset_emu();
+            continue;
         }
 
         let op_code = cpu.read_op_code();
@@ -152,6 +218,7 @@ fn main() -> io::Result<()> {
         println!("{:X}::{:X}{:X}{:X}{:X}", cpu.pc, op_1, op_2, op_3, op_4);
 
         match (op_1, op_2, op_3, op_4) {
+            // 0nnn - sys nnn - only used by old chip8
             // 00E0 - cls
             (0x0, 0x0, 0xE, 0x0) => {
                 for y in 0..32 {
@@ -265,25 +332,35 @@ fn main() -> io::Result<()> {
             // Dxyn - drw rx, ry, w
             (0xD, _, _, _) => {
                 println!("\tsprite at ({}, {}), {} bytes high", cpu.r[op_2 as usize], cpu.r[op_3 as usize], op_4);
+                let mut collision = false;
                 for offset in 0..op_4 {
                     for bit in 0..8 {
                         let x = ((cpu.r[op_2 as usize] as u16 + bit as u16) % 64 as u16) as usize;
                         let y = ((cpu.r[op_3 as usize] as u16 + offset as u16) % 32 as u16) as usize;
-                        if cpu.display[y][x] == 1 && (cpu.memory[(cpu.i+offset) as usize] & 0x1 << (7 - bit)) >> (7 - bit) == 1 {
-                            cpu.r[0xF] = 1;
-                        } else {
-                            cpu.r[0xF] = 0;
+                        
+                        let old_pixel = cpu.display[y][x];
+                        let new_pixel = (cpu.memory[(cpu.i+offset) as usize] & 0x1 << (7 - bit)) >> (7 - bit);
+
+                        if old_pixel == 1 && new_pixel == 1 {
+                            collision = true;
                         }
+                        
                         cpu.display[y][x] ^= (cpu.memory[(cpu.i+offset) as usize] & 0x1 << (7 - bit)) >> (7 - bit)
                     }
                 }
-                // for row in cpu.display.iter() {
-                //     for col in row.iter() {
-                //         print!("{:X} ", col);
-                //     }
-                //     println!();
-                // }
+                if collision {
+                    cpu.r[0xF] = 1;
+                } else {
+                    cpu.r[0xF] = 0;
+                }
                 cpu.draw_screen(&mut renderer);
+            },
+            // Ex9E - skp rx - skip if pressed
+            (0xE, _, 0x9, 0xE) => {
+                let keys = keyboard::KeyboardState::new(&event_pump);
+                if keys.is_scancode_pressed(SCANCODES[cpu.r[op_2 as usize] as usize]) == true {
+                    cpu.pc += 2;
+                }
             },
             // ExA1 - sknp rx - skip next if key not pressed
             (0xE, _, 0xA, 0x1) => {
@@ -343,13 +420,19 @@ fn main() -> io::Result<()> {
             },
             (_, _, _, _) => break,
         }
-        
-        if cpu.delay_timer > 0 {
-            cpu.delay_timer -= 1;   // this needs to be 60hz
+    
+        // check to see if our thread told us its been time to decrement this
+        let answer = rx.recv_timeout(std::time::Duration::from_micros(0));
+        if answer.is_ok() {
+            if cpu.delay_timer > 0 {
+                cpu.delay_timer -= 1;
+            }
+            if cpu.sound_timer > 0 {
+                cpu.sound_timer -= 1;
+            }
         }
-        cpu.pc += 2;
-        // cpu.draw_screen(&mut renderer);
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        
+        cpu.cycle();
         // let _ = std::io::stdin().read(&mut [0u8]).unwrap();
     }
 
