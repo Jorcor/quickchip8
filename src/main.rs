@@ -291,7 +291,7 @@ impl CPU {
             self.r[0xF] = 0;
         }
     }
-    // load rx = delay_timer
+    // load rx = delay_timer - FX07
     pub fn ld_dt_fx07(&mut self, x: u8) {
         self.r[x as usize] = self.delay_timer;
     }
@@ -303,27 +303,27 @@ impl CPU {
     pub fn ld_st_fx18(&mut self, x: u8) {
         self.sound_timer = self.r[x as usize];
     }
-    // add I = I + rx
+    // add I = I + rx - Fx1E
     pub fn add_i_fx1e(&mut self, x: u8) {
         self.i += self.r[x as usize] as u16;
     }
-    // load font character into I
+    // load font character into I - FX29
     pub fn ld_f_fx29(&mut self, x: u8) {
         self.i = (self.r[x as usize] * 0x5) as u16;
     }
-    // load digits into memory starting at I
+    // load digits into memory starting at I - FX33
     pub fn ld_b_fx33(&mut self, x: u8) {
         self.memory[self.i as usize] = self.r[x as usize] / 100;
         self.memory[(self.i + 1) as usize] = (self.r[x as usize] % 100) / 10;
         self.memory[(self.i + 2) as usize] = self.r[x as usize] % 10;
     }
-    // load registers into memory starting at I to x
+    // load registers into memory starting at I to x - FX55
     pub fn ld_reg_fx55(&mut self, x: u8) {
         for num in 0..=x as u16 {
             self.memory[(self.i + num) as usize] = self.r[num as usize];
         }
     }
-    // load memory into registers starting at I to x
+    // load memory into registers starting at I to x - FX65
     pub fn ld_reg_fx65(&mut self, x: u8) {
         for num in 0..=x as u16 {
             self.r[num as usize] = self.memory[(self.i + num) as usize];
